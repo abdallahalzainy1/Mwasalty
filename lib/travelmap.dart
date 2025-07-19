@@ -7,6 +7,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'package:google_fonts/google_fonts.dart';
 
 class TravelMapPage extends StatefulWidget {
   final String routeId;
@@ -25,6 +26,7 @@ class _TravelMapPageState extends State<TravelMapPage> {
   bool isLoading = true;
   String errorMessage = '';
   bool isGeocoding = false;
+  int? selectedStepIndex;
 
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -56,7 +58,7 @@ class _TravelMapPageState extends State<TravelMapPage> {
       await _processRouteData(data);
     } catch (e) {
       setState(() {
-        errorMessage = 'خطأ في تحميل البيانات: $e';
+        errorMessage = 'خطأ في تحميل البيانات: ${e.toString()}';
         isLoading = false;
       });
     }
@@ -68,61 +70,100 @@ class _TravelMapPageState extends State<TravelMapPage> {
       List<Map<String, dynamic>> processedSteps = [];
       List<LatLng> processedRoutePoints = [];
 
-      // Get coordinates for start location
       final fromLocation = data['from'] as String? ?? '';
-      final startCoords = await _geocodeLocation(fromLocation);
+      if (fromLocation.isEmpty) {
+        throw Exception('موقع البداية غير محدد');
+      }
+
+      final startCoords = await _getPreciseCoordinates(fromLocation);
       processedRoutePoints.add(startCoords);
 
-      // Process each step in the timeline
       for (var step in timeline) {
-        final stepText = step['step'] as String? ?? '';
-        final transport = _determineTransportType(stepText);
-        
-        // Extract location names from step description
-        final locations = _extractLocationsFromStep(stepText);
-        if (locations.length < 2) continue;
+        try {
+          final stepText = step['step'] as String? ?? '';
+          if (stepText.isEmpty) continue;
 
-        // Geocode the "to" location
-        final toLocation = locations[1];
-        final toCoords = await _geocodeLocation(toLocation);
+          final transport = _determineTransportType(stepText);
+          final locations = _extractLocationsFromStep(stepText);
+          
+          if (locations.length < 2 || locations[0].isEmpty || locations[1].isEmpty) continue;
 
-        processedSteps.add({
-          'from': processedRoutePoints.last,
-          'to': toCoords,
-          'transport': transport,
-          'step': stepText,
-          'duration': step['duration'] ?? 'غير معروف',
-          'price': step['price'] ?? 'غير معروف',
-          'start_time': step['start_time'] ?? 'غير معروف',
-        });
+          final toLocation = locations[1];
+          final toCoords = await _getPreciseCoordinates(toLocation);
 
-        processedRoutePoints.add(toCoords);
+          if (toCoords.latitude == 0.0 && toCoords.longitude == 0.0) continue;
+
+          processedSteps.add({
+            'from': processedRoutePoints.last,
+            'to': toCoords,
+            'transport': transport,
+            'step': stepText,
+            'duration': (step['duration'] ?? 'غير معروف').toString(),
+            'price': (step['price'] ?? 'غير معروف').toString(),
+            'start_time': (step['start_time'] ?? 'غير معروف').toString(),
+          });
+
+          processedRoutePoints.add(toCoords);
+        } catch (e) {
+          continue;
+        }
       }
+
+      if (processedSteps.isEmpty) throw Exception('لا توجد خطوات صالحة لعرضها');
 
       setState(() {
         steps = processedSteps;
         routePoints = processedRoutePoints;
         isLoading = false;
+        errorMessage = '';
       });
 
-      _zoomToFitRoute();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _zoomToFitRoute();
+      });
     } catch (e) {
       setState(() {
-        errorMessage = 'خطأ في معالجة البيانات: $e';
+        errorMessage = 'حدث خطأ في عرض البيانات: ${e.toString()}';
         isLoading = false;
       });
     }
   }
 
-  Future<LatLng> _geocodeLocation(String location) async {
+  Future<LatLng> _getPreciseCoordinates(String location) async {
+    if (location.isEmpty) throw Exception('اسم الموقع فارغ');
     setState(() => isGeocoding = true);
     
     try {
-      print('📍 جارٍ جلب الإحداثيات للموقع: $location');
-      
-      final prompt = '''
+      final coords = await _geocodeLocation(location, precise: true);
+      return coords;
+    } catch (e) {
+      return await _geocodeLocation(location, precise: false);
+    } finally {
+      setState(() => isGeocoding = false);
+    }
+  }
+
+  Future<LatLng> _geocodeLocation(String location, {bool precise = true}) async {
+    try {
+      final prompt = precise ? '''
 أريد إحداثيات GPS دقيقة للموقع التالي في مصر:
 "$location"
+
+الرجاء تحديد الموقع الدقيق بناءً على السياق التالي:
+- إذا كان الموقع محطة قطار، حدد إحداثيات المحطة الرئيسية
+- إذا كان الموقف موقف مواصلات، حدد الموقع الأكثر شهرة
+- إذا كانت المنطقة كبيرة، حدد المركز الجغرافي أو الموقع الأكثر شهرة
+
+الرجاء الرد بصيغة JSON تحتوي على خط الطول والعرض فقط، مثل:
+{
+  "latitude": 30.0444,
+  "longitude": 31.2357
+}
+''' : '''
+أريد إحداثيات GPS تقريبية للمنطقة التالية في مصر:
+"$location"
+
+حدد المركز الجغرافي للمنطقة أو الموقع الأكثر شهرة فيها.
 
 الرجاء الرد بصيغة JSON تحتوي على خط الطول والعرض فقط، مثل:
 {
@@ -149,40 +190,47 @@ class _TravelMapPageState extends State<TravelMapPage> {
         final decoded = jsonDecode(response.body);
         final rawText = decoded['candidates'][0]['content']['parts'][0]['text'];
         final cleanJson = rawText.replaceAll("```json", "").replaceAll("```", "").trim();
-        final coords = jsonDecode(cleanJson);
         
-        print('✅ إحداثيات $location: ${coords['latitude']}, ${coords['longitude']}');
-        return LatLng(coords['latitude'], coords['longitude']);
+        final jsonStart = cleanJson.indexOf('{');
+        final jsonEnd = cleanJson.lastIndexOf('}');
+        if (jsonStart == -1 || jsonEnd == -1) throw Exception('لا يمكن العثور على JSON في الرد');
+        
+        final jsonString = cleanJson.substring(jsonStart, jsonEnd + 1);
+        final coords = jsonDecode(jsonString);
+        
+        if (coords['latitude'] == null || coords['longitude'] == null) throw Exception('إحداثيات غير صالحة');
+        
+        return LatLng(coords['latitude'].toDouble(), coords['longitude'].toDouble());
       } else {
         throw Exception('فشل في جلب الإحداثيات: ${response.statusCode}');
       }
     } catch (e) {
-      print('❌ خطأ في جلب إحداثيات $location: $e');
-      // Fallback to Cairo coordinates if geocoding fails
-      return  LatLng(30.0444, 31.2357);
-    } finally {
-      setState(() => isGeocoding = false);
+      return LatLng(30.0444, 31.2357);
     }
   }
 
   List<String> _extractLocationsFromStep(String stepText) {
-    // This regex extracts locations from step descriptions like:
-    // "ميكروباص من موقف سنورس إلى الفيوم"
-    final regex = RegExp(r'من\s(.+?)\sإلى\s(.+)$');
-    final match = regex.firstMatch(stepText);
-    
-    if (match != null && match.groupCount >= 2) {
-      return [match.group(1)!, match.group(2)!];
+    if (stepText.isEmpty) return ['', ''];
+    final patterns = [
+      RegExp(r'من\s(.+?)\sإلى\s(.+)$'),
+      RegExp(r'بين\s(.+?)\sو\s(.+)$'),
+      RegExp(r'من\s(.+?)\sل\s(.+)$'),
+    ];
+
+    for (final pattern in patterns) {
+      final match = pattern.firstMatch(stepText);
+      if (match != null && match.groupCount >= 2) {
+        return [match.group(1)!.trim(), match.group(2)!.trim()];
+      }
     }
-    
-    // Fallback for other patterns
+
     if (stepText.contains('إلى')) {
       final parts = stepText.split('إلى');
       if (parts.length >= 2) {
         return [parts[0].replaceAll('من', '').trim(), parts[1].trim()];
       }
     }
-    
+
     return ['', ''];
   }
 
@@ -196,52 +244,66 @@ class _TravelMapPageState extends State<TravelMapPage> {
 
   void _zoomToFitRoute() {
     if (routePoints.isEmpty) return;
-
-    double minLat = routePoints[0].latitude;
-    double maxLat = routePoints[0].latitude;
-    double minLng = routePoints[0].longitude;
-    double maxLng = routePoints[0].longitude;
-
-    for (final point in routePoints) {
-      if (point.latitude < minLat) minLat = point.latitude;
-      if (point.latitude > maxLat) maxLat = point.latitude;
-      if (point.longitude < minLng) minLng = point.longitude;
-      if (point.longitude > maxLng) maxLng = point.longitude;
-    }
-
-    final center = LatLng(
-      (minLat + maxLat) / 2,
-      (minLng + maxLng) / 2,
+    _mapController.fitBounds(
+      LatLngBounds.fromPoints(routePoints),
+      options: const FitBoundsOptions(padding: EdgeInsets.all(30)),
     );
+  }
 
-    final latDiff = maxLat - minLat;
-    final lngDiff = maxLng - minLng;
-    final zoom = 11 - (latDiff + lngDiff) * 2;
-
-    _mapController.move(center, zoom.clamp(7.0, 15.0));
+  void _zoomToStep(int index) {
+    if (index < 0 || index >= steps.length) return;
+    final step = steps[index];
+    _mapController.move(step['from'], 15.0);
+    setState(() => selectedStepIndex = index);
   }
 
   String _formatTimestamp(Timestamp timestamp) {
     return DateFormat('yyyy-MM-dd HH:mm').format(timestamp.toDate());
   }
 
+  IconData _getTransportIcon(String transportType) {
+    switch (transportType) {
+      case 'train': return FontAwesomeIcons.train;
+      case 'microbus': return FontAwesomeIcons.vanShuttle;
+      case 'bus': return FontAwesomeIcons.bus;
+      case 'taxi': return FontAwesomeIcons.taxi;
+      default: return FontAwesomeIcons.questionCircle;
+    }
+  }
+
+  Color _getTransportColor(String transportType) {
+    switch (transportType) {
+      case 'train': return const Color(0xFF4285F4);
+      case 'microbus': return const Color(0xFFFBBC05);
+      case 'bus': return const Color(0xFF34A853);
+      case 'taxi': return const Color(0xFFEA4335);
+      default: return Colors.grey;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDarkMode = theme.brightness == Brightness.dark;
+
     if (isLoading || isGeocoding) {
       return Scaffold(
-        appBar: AppBar(title: const Text('مسار الرحلة')),
+        appBar: _buildAppBar(),
         body: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               const CircularProgressIndicator(),
+              const SizedBox(height: 20),
+              Text(
+                isGeocoding ? 'جارٍ تحديد مواقع المحطات...' : 'جارٍ التحميل...',
+                style: GoogleFonts.tajawal(fontSize: 18, fontWeight: FontWeight.w600),
+              ),
               if (isGeocoding) ...[
-                const SizedBox(height: 20),
-                const Text('جارٍ تحديد مواقع المحطات...'),
                 const SizedBox(height: 10),
                 Text(
                   'قد يستغرق هذا بضع لحظات',
-                  style: TextStyle(color: Colors.grey[600]),
+                  style: GoogleFonts.tajawal(fontSize: 14, color: Colors.grey[600]),
                 ),
               ],
             ],
@@ -252,14 +314,29 @@ class _TravelMapPageState extends State<TravelMapPage> {
 
     if (errorMessage.isNotEmpty) {
       return Scaffold(
-        appBar: AppBar(title: const Text('خطأ')),
+        appBar: _buildAppBar(),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(20.0),
-            child: Text(
-              errorMessage,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 16),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.error_outline, size: 48, color: Colors.red[400]),
+                const SizedBox(height: 20),
+                Text(errorMessage, textAlign: TextAlign.center,
+                  style: GoogleFonts.tajawal(fontSize: 16, fontWeight: FontWeight.w500)),
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  onPressed: _fetchRouteData,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4285F4),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                  ),
+                  child: Text('إعادة المحاولة',
+                    style: GoogleFonts.tajawal(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white)),
+                ),
+              ],
             ),
           ),
         ),
@@ -267,196 +344,457 @@ class _TravelMapPageState extends State<TravelMapPage> {
     }
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('مسار الرحلة'),
-        centerTitle: true,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
+      appBar: _buildAppBar(),
+      floatingActionButton: Column(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          FloatingActionButton(
+            heroTag: 'zoom_fit',
+            mini: true,
+            onPressed: _zoomToFitRoute,
+            backgroundColor: const Color(0xFF4285F4),
+            child: const Icon(Icons.zoom_out_map, color: Colors.white),
+          ),
+          const SizedBox(height: 12),
+          FloatingActionButton(
+            heroTag: 'my_location',
             onPressed: () {
-              setState(() {
-                isLoading = true;
-                errorMessage = '';
-              });
-              _fetchRouteData();
+              if (routePoints.isNotEmpty) _mapController.move(routePoints.first, 15.0);
             },
+            backgroundColor: const Color(0xFF34A853),
+            child: const Icon(Icons.my_location, color: Colors.white),
           ),
         ],
       ),
       body: Column(
         children: [
           Expanded(
-            child: FlutterMap(
-              mapController: _mapController,
-              options: MapOptions(
-                center: routePoints.isNotEmpty ? routePoints[0] :  LatLng(29.3085, 30.8421),
-                zoom: 7.0,
-              ),
+            child: Stack(
               children: [
-                TileLayer(
-                  urlTemplate: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                  subdomains: ['a', 'b', 'c'],
-                ),
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
-                      points: routePoints,
-                      color: Colors.blue.withOpacity(0.7),
-                      strokeWidth: 4,
+                FlutterMap(
+                  mapController: _mapController,
+                  options: MapOptions(
+                    center: routePoints.isNotEmpty ? routePoints[0] :  LatLng(29.3085, 30.8421),
+                    zoom: 7.0,
+                  ),
+                  children: [
+                    TileLayer(
+                      urlTemplate: isDarkMode
+                          ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+                          : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+                      subdomains: const ['a', 'b', 'c'],
                     ),
+                    PolylineLayer(
+                      polylines: [
+                        Polyline(
+                          points: routePoints,
+                          strokeWidth: 6.5,
+                          color: const Color(0xFF4285F4).withOpacity(0.8),
+                        ),
+                        if (selectedStepIndex != null && selectedStepIndex! < steps.length)
+                          Polyline(
+                            points: [steps[selectedStepIndex!]['from'], steps[selectedStepIndex!]['to']],
+                            strokeWidth: 8,
+                            color: const Color(0xFFFBBC05).withOpacity(0.6),
+                          ),
+                      ],
+                    ),
+                    MarkerLayer(markers: _buildMapMarkers()),
                   ],
                 ),
-                MarkerLayer(
-                  markers: [
-                    if (routePoints.isNotEmpty)
-                      Marker(
-                        point: routePoints.first,
-                        builder: (ctx) => const Icon(
-                          Icons.location_on,
-                          color: Colors.red,
-                          size: 40,
+                Positioned(
+                  bottom: 16,
+                  right: 16,
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: isDarkMode ? Colors.grey[800] : Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.1),
+                          blurRadius: 8,
+                          offset: const Offset(0, 4),
                         ),
+                      ],
+                    ),
+                    child: SizedBox(
+                      width: 120,
+                      height: 120,
+                      child: FlutterMap(
+                        options: MapOptions(
+                          center: routePoints.isNotEmpty ? routePoints[0] :  LatLng(29.3085, 30.8421),
+                          zoom: 5.0,
+                          interactiveFlags: InteractiveFlag.none,
+                        ),
+                        children: [
+                          TileLayer(
+                            urlTemplate: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                            subdomains: const ['a', 'b', 'c'],
+                          ),
+                          PolylineLayer(
+                            polylines: [
+                              Polyline(
+                                points: routePoints,
+                                color: const Color(0xFF4285F4),
+                                strokeWidth: 2,
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
-                    if (routePoints.length > 1)
-                      Marker(
-                        point: routePoints.last,
-                        builder: (ctx) => const Icon(
-                          Icons.location_on,
-                          color: Colors.green,
-                          size: 40,
-                        ),
-                      ),
-                    ...steps.map((step) {
-                      IconData icon;
-                      Color color;
-                      
-                      switch (step['transport']) {
-                        case 'train':
-                          icon = FontAwesomeIcons.train;
-                          color = Colors.blue;
-                          break;
-                        case 'microbus':
-                          icon = FontAwesomeIcons.bus;
-                          color = Colors.orange;
-                          break;
-                        case 'bus':
-                          icon = FontAwesomeIcons.busAlt;
-                          color = Colors.purple;
-                          break;
-                        case 'taxi':
-                          icon = FontAwesomeIcons.taxi;
-                          color = Colors.teal;
-                          break;
-                        default:
-                          icon = FontAwesomeIcons.questionCircle;
-                          color = Colors.grey;
-                      }
-                      
-                      return Marker(
-                        point: step['from'],
-                        width: 40,
-                        height: 40,
-                        builder: (ctx) => Icon(
-                          icon,
-                          color: color,
-                          size: 24,
-                        ),
-                      );
-                    }).toList(),
-                  ],
+                    ),
+                  ),
                 ),
               ],
             ),
           ),
-          Container(
-            padding: const EdgeInsets.all(16),
+          _buildTripDetailsPanel(isDarkMode),
+        ],
+      ),
+    );
+  }
+
+  AppBar _buildAppBar() {
+    return AppBar(
+      title: Text('مسار الرحلة',
+        style: GoogleFonts.tajawal(fontSize: 22, fontWeight: FontWeight.bold)),
+      centerTitle: true,
+      actions: [
+        IconButton(
+          icon: const Icon(Icons.refresh),
+          onPressed: () {
+            setState(() {
+              isLoading = true;
+              errorMessage = '';
+            });
+            _fetchRouteData();
+          },
+        ),
+      ],
+    );
+  }
+
+  List<Marker> _buildMapMarkers() {
+    final markers = <Marker>[];
+    if (routePoints.isEmpty) return markers;
+
+    markers.add(Marker(
+      point: routePoints.first,
+      builder: (ctx) => const Icon(Icons.location_pin, color: Colors.red, size: 48),
+    ));
+
+    markers.add(Marker(
+      point: routePoints.last,
+      builder: (ctx) => const Icon(Icons.location_pin, color: Colors.green, size: 48),
+    ));
+
+    for (int i = 0; i < steps.length; i++) {
+      final step = steps[i];
+      markers.add(Marker(
+        point: step['from'],
+        width: 40,
+        height: 40,
+        builder: (ctx) => GestureDetector(
+          onTap: () => _zoomToStep(i),
+          child: Container(
             decoration: BoxDecoration(
-              color: Colors.grey[200],
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (travelData['from'] != null && travelData['to'] != null)
-                  Text(
-                    '${travelData['from']} → ${travelData['to']}',
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                const SizedBox(height: 8),
-                if (travelData['createdAt'] != null)
-                  Text(
-                    'تم الإنشاء: ${_formatTimestamp(travelData['createdAt'] as Timestamp)}',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.grey[600],
-                    ),
-                  ),
-                if (travelData['duration'] != null)
-                  Text(
-                    'المدة: ${travelData['duration']}',
-                    style: const TextStyle(fontSize: 16),
-                  ),
-                if (travelData['price'] != null)
-                  Text(
-                    'التكلفة: ${travelData['price']}',
-                    style: const TextStyle(fontSize: 16),
-                  ),
-                if (travelData['method'] != null)
-                  Text(
-                    'المواصلات: ${travelData['method']}',
-                    style: const TextStyle(fontSize: 16),
-                  ),
-                const SizedBox(height: 16),
-                ...steps.map((step) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Row(
-                    children: [
-                      Icon(
-                        step['transport'] == 'train' 
-                            ? FontAwesomeIcons.train 
-                            : step['transport'] == 'microbus'
-                              ? FontAwesomeIcons.bus
-                              : FontAwesomeIcons.questionCircle,
-                        color: step['transport'] == 'train' 
-                            ? Colors.blue 
-                            : step['transport'] == 'microbus'
-                              ? Colors.orange
-                              : Colors.grey,
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              step['step'],
-                              style: const TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                            Text('${step['duration']} - ${step['price']}'),
-                            Text('يبدأ في: ${step['start_time']}'),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                )).toList(),
-                if (travelData['tips'] != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 16),
-                    child: Text(
-                      'نصائح: ${travelData['tips']}',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.grey[700],
-                        fontStyle: FontStyle.italic,
-                      ),
-                    ),
-                  ),
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.2),
+                  blurRadius: 4,
+                  offset: const Offset(0, 2),
+                ),
               ],
             ),
+            padding: const EdgeInsets.all(8),
+            child: Icon(
+              _getTransportIcon(step['transport']),
+              color: i == selectedStepIndex 
+                  ? const Color(0xFFFBBC05)
+                  : _getTransportColor(step['transport']),
+              size: 24,
+            ),
+          ),
+        ),
+      ));
+    }
+
+    return markers;
+  }
+
+  Widget _buildTripDetailsPanel(bool isDarkMode) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+      decoration: BoxDecoration(
+        color: isDarkMode ? Colors.grey[900] : Colors.white,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 16,
+            offset: const Offset(0, -8),
+          ),
+        ],
+      ),
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.35,
+      ),
+      child: Column(
+        children: [
+          Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Colors.grey[400],
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (travelData['from'] != null && travelData['to'] != null)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Text('${travelData['from']} → ${travelData['to']}',
+                        style: GoogleFonts.tajawal(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: isDarkMode ? Colors.white : Colors.black,
+                        ),
+                      ),
+                    ),
+                  if (travelData['createdAt'] != null)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Text(
+                        'تم الإنشاء: ${_formatTimestamp(travelData['createdAt'] as Timestamp)}',
+                        style: GoogleFonts.tajawal(
+                          fontSize: 12,
+                          color: isDarkMode ? Colors.grey[400] : Colors.grey[600],
+                        ),
+                      ),
+                    ),
+                  const SizedBox(height: 8),
+                  _buildSummarySection(isDarkMode),
+                  const SizedBox(height: 8),
+                  ...steps.asMap().entries.map((entry) => 
+                    _buildTimelineStep(entry.value, entry.key, isDarkMode)
+                  ).toList(),
+                  if (travelData['tips'] != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8, bottom: 8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            child: Text('نصائح مفيدة:',
+                              style: GoogleFonts.tajawal(
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                                color: isDarkMode ? Colors.white : Colors.black,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            margin: const EdgeInsets.symmetric(horizontal: 8),
+                            decoration: BoxDecoration(
+                              color: isDarkMode ? Colors.grey[800] : Colors.amber[50],
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              travelData['tips'],
+                              style: GoogleFonts.tajawal(
+                                fontSize: 12,
+                                color: isDarkMode ? Colors.amber[100] : Colors.amber[900],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummarySection(bool isDarkMode) {
+    return Container(
+      padding: const EdgeInsets.all(8),
+      margin: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: isDarkMode ? Colors.grey[800] : Colors.grey[100],
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          _buildSummaryItem(
+            icon: Icons.access_time,
+            label: 'المدة',
+            value: travelData['duration'] ?? 'غير معروف',
+            isDarkMode: isDarkMode,
+          ),
+          _buildSummaryItem(
+            icon: Icons.attach_money,
+            label: 'التكلفة',
+            value: travelData['price'] ?? 'غير معروف',
+            isDarkMode: isDarkMode,
+          ),
+          _buildSummaryItem(
+            icon: Icons.directions_bus,
+            label: 'المواصلات',
+            value: travelData['method'] ?? 'غير معروف',
+            isDarkMode: isDarkMode,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummaryItem({
+    required IconData icon,
+    required String label,
+    required String value,
+    required bool isDarkMode,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      constraints: const BoxConstraints(maxWidth: 100),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 18, color: isDarkMode ? Colors.grey[400] : Colors.grey[600]),
+          const SizedBox(height: 2),
+          Text(label,
+            style: GoogleFonts.tajawal(fontSize: 10, color: isDarkMode ? Colors.grey[400] : Colors.grey[600]),
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 2),
+          Text(value,
+            style: GoogleFonts.tajawal(fontSize: 12, fontWeight: FontWeight.bold, color: isDarkMode ? Colors.white : Colors.black),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTimelineStep(Map<String, dynamic> step, int index, bool isDarkMode) {
+    return GestureDetector(
+      onTap: () => _zoomToStep(index),
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: index == selectedStepIndex 
+              ? (isDarkMode ? Colors.blue[900] : Colors.blue[50])
+              : (isDarkMode ? Colors.grey[800] : Colors.white),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: index == selectedStepIndex ? const Color(0xFF4285F4) : Colors.transparent,
+            width: 1,
+          ),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: _getTransportColor(step['transport']).withOpacity(0.1),
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: _getTransportColor(step['transport']),
+                  width: 1.5,
+                ),
+              ),
+              child: Icon(
+                _getTransportIcon(step['transport']),
+                color: _getTransportColor(step['transport']),
+                size: 16,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(step['step'],
+                    style: GoogleFonts.tajawal(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: isDarkMode ? Colors.white : Colors.black,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 4),
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        _buildStepDetail(
+                          icon: Icons.access_time,
+                          value: step['duration'],
+                          isDarkMode: isDarkMode,
+                        ),
+                        const SizedBox(width: 8),
+                        _buildStepDetail(
+                          icon: Icons.schedule,
+                          value: step['start_time'],
+                          isDarkMode: isDarkMode,
+                        ),
+                        if (step['price'] != null) ...[
+                          const SizedBox(width: 8),
+                          _buildStepDetail(
+                            icon: Icons.attach_money,
+                            value: step['price'],
+                            isDarkMode: isDarkMode,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStepDetail({
+    required IconData icon,
+    required String value,
+    required bool isDarkMode,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      decoration: BoxDecoration(
+        color: isDarkMode ? Colors.grey[700] : Colors.grey[200],
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: isDarkMode ? Colors.grey[400] : Colors.grey[600]),
+          const SizedBox(width: 2),
+          Text(value,
+            style: GoogleFonts.tajawal(fontSize: 10, color: isDarkMode ? Colors.grey[300] : Colors.grey[700]),
           ),
         ],
       ),
