@@ -1,0 +1,40 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "com.google.gms.google-services" // FlutterFire
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+android {
+    namespace "com.alzainy.tahadi"
+    compileSdk flutter.compileSdkVersion
+    ndkVersion flutter.ndkVersion
+    
+
+    defaultConfig {
+        applicationId "com.alzainy.tahadi"
+        minSdkVersion 23
+        targetSdk flutter.targetSdkVersion
+        versionCode flutter.versionCode
+        versionName flutter.versionName
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.debug
+        }
+    }
+}
+
+flutter {
+    source = "../.."
+}

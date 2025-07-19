@@ -1,0 +1,32 @@
+name: tahadi
+description: A new Flutter project.
+
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=2.17.0 <3.0.0"
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.2
+  flutter_polyline_points: ^1.0.0
+  http: ^0.13.6
+  geolocator: ^10.1.0
+  google_maps_flutter: ^2.2.8
+  google_sign_in: ^6.1.0
+  firebase_auth: ^4.17.4
+  cloud_firestore: ^4.15.5
+  flutter_map: ^4.0.0
+  latlong2: ^0.8.2
+  font_awesome_flutter: ^10.8.0
+
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
